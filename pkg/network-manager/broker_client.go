@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"strings"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -46,28 +47,28 @@ import (
 type BrokerClient struct {
 	ID *nodecorev1alpha1.NodeIdentity //this node
 
-	enableWANDiscovery bool
-	subFlag            bool
-	pubFlag            bool
+	subFlag bool
+	pubFlag bool
 
 	serverName string
-	serverIP   string
-	cert       *corev1.Secret
+	serverAddr string
+	clCert     *corev1.Secret
 	caCert     *corev1.Secret
-	clientIP   string
+	//clientIP   string
 
+	conn         *amqp.Connection
 	ch           *amqp.Channel
 	exchangeName string
 	routingKey   string
-	conn         *amqp.Connection
-	queueName    string
+
+	queueName string
 	//queue        amqp.Queue
 	msgs        <-chan amqp.Delivery
 	outboundMsg []byte
 }
 
-// Setup the Broker Client. From NM reconcile
-func SetupBrokerClient(ctx context.Context, cl client.Client, bc *BrokerClient, Address string, Name string, Cert corev1.Secret, caCert corev1.Secret) error {
+// Setup the Broker Client from NM reconcile
+func (bc *BrokerClient) SetupBrokerClient(ctx context.Context, cl client.Client, broker *networkv1alpha1.Broker) error {
 	klog.Info("Setting up Broker Client routines")
 
 	var err error
@@ -76,12 +77,25 @@ func SetupBrokerClient(ctx context.Context, cl client.Client, bc *BrokerClient, 
 	if nodeIdentity == nil {
 		return fmt.Errorf("failed to get Node Identity")
 	}
+
 	bc.ID = nodeIdentity
-	bc.serverName = Name
-	bc.serverIP = Address
-	bc.cert = &Cert
-	bc.caCert = &caCert
+	bc.serverName = broker.Spec.Name
+	bc.serverAddr = broker.Spec.Address
+	bc.clCert = broker.Spec.ClCert
+	bc.caCert = broker.Spec.CaCert
 	bc.exchangeName = "DefaultPeerRequest"
+
+	//setting pub/sub
+	if strings.EqualFold(broker.Spec.Role, "publisher") {
+		bc.pubFlag = true
+		bc.subFlag = false
+	} else if strings.EqualFold(broker.Spec.Role, "subscriber") {
+		bc.pubFlag = false
+		bc.subFlag = true
+	} else {
+		bc.pubFlag = true
+		bc.subFlag = true
+	}
 
 	bc.outboundMsg, err = json.Marshal(bc.ID)
 	if err != nil {
@@ -89,33 +103,38 @@ func SetupBrokerClient(ctx context.Context, cl client.Client, bc *BrokerClient, 
 	}
 
 	// Extract certs and key
-	clientCert, ok := bc.cert.Data["tls.crt"]
+	clientCert, ok := bc.clCert.Data["tls.crt"]
 	if !ok {
-		fmt.Println("cert error")
-		return nil
+		klog.Fatalf("cert error: %v", ok)
+		return fmt.Errorf("missing certificate: 'tls.crt' not found in clCert Data")
 	}
 
-	clientKey, ok := bc.cert.Data["tls.key"]
+	clientKey, ok := bc.clCert.Data["tls.key"]
 	if !ok {
-		fmt.Println("key error")
-		return nil
+		klog.Fatalf("key error: %v", ok)
+		return fmt.Errorf("missing key: 'tls.key' not found in clCert Data")
 	}
 
 	caCertData, ok := bc.caCert.Data["tls.crt"]
 	if !ok {
-		fmt.Println("CA cert error")
-		return nil
+		klog.Fatalf("CA cert error: %v", ok)
+		return fmt.Errorf("missing certificate: 'tls.crt' not found in CACert Data")
 	}
 
 	// load client cert and privKey
 	cert, err := tls.X509KeyPair(clientCert, clientKey)
 	if err != nil {
 		klog.Fatalf("error X509KeyPair: %v", err)
+		return err
 	}
 
 	// load CAcert
 	caCertPool := x509.NewCertPool()
-	caCertPool.AppendCertsFromPEM(caCertData)
+	ok = caCertPool.AppendCertsFromPEM(caCertData)
+	if !ok {
+		klog.Fatalf("AppendCertsFromPEM error: %v", ok)
+		return fmt.Errorf("AppendCertsFromPEM error: parsing failed")
+	}
 
 	// TLS config
 	tlsConfig := &tls.Config{
@@ -136,28 +155,26 @@ func SetupBrokerClient(ctx context.Context, cl client.Client, bc *BrokerClient, 
 	return err
 }
 
-// Execute the Network Manager routines.
+// Execute the Network Manager Broker routines.
 func (bc *BrokerClient) ExecuteBrokerClient(ctx context.Context, cl client.Client) error {
 	// Start sending messages
-	if bc.enableWANDiscovery {
-		if bc.pubFlag {
-			go func() {
-				if err := bc.publishOnBroker(ctx); err != nil {
-					klog.ErrorS(err, "Error sending advertisement")
-				}
-			}()
-		}
 
-		// Start receiving messages
-		if bc.subFlag {
-			go func() {
-				if err := bc.readMsgOnBroker(ctx, cl); err != nil {
-					klog.ErrorS(err, "Error receiving advertisement")
-				}
-			}()
-		}
+	if bc.pubFlag {
+		go func() {
+			if err := bc.publishOnBroker(ctx); err != nil {
+				klog.ErrorS(err, "Error sending advertisement")
+			}
+		}()
 	}
 
+	// Start receiving messages
+	if bc.subFlag {
+		go func() {
+			if err := bc.readMsgOnBroker(ctx, cl); err != nil {
+				klog.ErrorS(err, "Error receiving advertisement")
+			}
+		}()
+	}
 	return nil
 }
 
@@ -180,7 +197,7 @@ func (bc *BrokerClient) publishOnBroker(ctx context.Context) error {
 			if err != nil {
 				klog.Fatalf("Error pub message: %v", err)
 			} else {
-				fmt.Printf("Message on exchange '%s' with routing key '%s': '%s'\n", bc.exchangeName, bc.routingKey, bc.clientIP)
+				fmt.Printf("Message on exchange '%s' with routing key '%s': \n", bc.exchangeName, bc.routingKey)
 			}
 
 		case <-ctx.Done():
@@ -204,7 +221,6 @@ func (bc *BrokerClient) readMsgOnBroker(ctx context.Context, cl client.Client) e
 		}
 
 		//create knownCluster CR
-
 		kc := &networkv1alpha1.Broker{}
 
 		if err := cl.Get(ctx, client.ObjectKey{Name: namings.ForgeKnownClusterName(remote.ID.NodeID), Namespace: flags.FluidosNamespace}, kc); err != nil {
@@ -228,9 +244,7 @@ func (bc *BrokerClient) readMsgOnBroker(ctx context.Context, cl client.Client) e
 			}
 			klog.InfoS("KnownCluster updated", "ID", kc.ObjectMeta.Name)
 		}
-
 	}
-
 	return nil
 }
 
@@ -266,8 +280,8 @@ func (bc *BrokerClient) rabbitConfig(tlsConfig *tls.Config) error {
 		Heartbeat:       10 * time.Second,                            // Intervallo heartbeat
 	}
 
-	// Configurazione di connessione e exchange
-	rabbitMQURL := "amqps://" + bc.serverName + ":5671/" //pre TLS "amqp://guest:guest@localhost:5672/"
+	// Config connection
+	rabbitMQURL := "amqps://" + bc.serverAddr + ":5671/" //pre TLS "amqp://guest:guest@localhost:5672/"
 
 	// RABBITMQ conn
 	bc.conn, err = amqp.DialConfig(rabbitMQURL, config) // conn, err := amqp.DialTLS(rabbitMQURL, tlsConfig)//conn, err := amqp.Dial(rabbitMQURL)
@@ -296,7 +310,7 @@ func (bc *BrokerClient) rabbitConfig(tlsConfig *tls.Config) error {
 	// 	klog.Fatalf("Error declaring queue: %s", err)
 	// }
 
-	//fmt.Printf("Waiting messages on queue %s", bc.queue.Name)
+	// fmt.Printf("Waiting messages on queue %s", bc.queue.Name)
 
 	// Sottoscrizione alla coda
 	bc.msgs, err = bc.ch.Consume(
@@ -312,7 +326,7 @@ func (bc *BrokerClient) rabbitConfig(tlsConfig *tls.Config) error {
 		klog.Fatalf("Error subscribing queue: %s", err)
 	}
 
-	klog.InfoS("Node", "ID", bc.ID.NodeID, "Address", bc.ID.IP, "Server IP", bc.serverIP, "RoutingKey", bc.routingKey)
+	klog.InfoS("Node", "ID", bc.ID.NodeID, "Client Address", bc.ID.IP, "Server Address", bc.serverAddr, "RoutingKey", bc.routingKey)
 
 	return nil
 }

@@ -23,10 +23,11 @@ import (
 type BrokerSpec struct {
 
 	// Address of the Broker.
-	Address string        `json:"address"`
-	Name    string        `json:"name"`
-	Cert    corev1.Secret `json:"cert"`
-	Role    string        `json:"role"`
+	Address string         `json:"address"`
+	Name    string         `json:"name"`
+	ClCert  *corev1.Secret `json:"clcert"`
+	CaCert  *corev1.Secret `json:"cacert"`
+	Role    string         `json:"role"`
 }
 
 // BrokerStatus defines the observed state of Broker.

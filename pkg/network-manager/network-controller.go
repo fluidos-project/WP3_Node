@@ -51,24 +51,68 @@ type NetworkManager struct {
 }
 
 // KnownClusterReconciler reconciles a KnownCluster object.
-type KnownClusterReconciler struct {
+type BrokerReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme        *runtime.Scheme
+	ActiveBrokers []*BrokerClient
 }
 
 // Reconcile reconciles a KnownClusters from DiscoveredClustersList.
-func (r *KnownClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := ctrl.LoggerFrom(ctx, "kowncluster", req.NamespacedName)
+func (r *BrokerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	log := ctrl.LoggerFrom(ctx, "broker", req.NamespacedName)
 	ctx = ctrl.LoggerInto(ctx, log)
 
 	klog.InfoS("Reconcile triggered", "context", ctx)
+
+	var broker networkv1alpha1.Broker
+	if err := r.Get(ctx, req.NamespacedName, &broker); client.IgnoreNotFound(err) != nil {
+		klog.Errorf("Error when getting Broker %s before reconcile: %v", req.NamespacedName, err)
+		return ctrl.Result{}, err
+	} else if err != nil {
+		klog.Infof("Broker %s not found, probably deleted", req.NamespacedName)
+
+		//if !found in CR && found in slice -> delete
+		for i, brok := range r.ActiveBrokers {
+			if brok.serverAddr == broker.Spec.Address {
+				//DELETE GRACEFUL
+				if err := r.brokerDelete( /*ctx, &broker,*/ brok, i); err != nil {
+					return ctrl.Result{}, err
+				}
+				break
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	//if found in CR && found in slice -> update
+	found := false
+	for i, brok := range r.ActiveBrokers {
+		if brok.serverAddr == broker.Spec.Address {
+			found = true
+			//UPDATE
+			if err := r.brokerUpdate(ctx, &broker, brok, i); err != nil {
+				return ctrl.Result{}, err
+			}
+			break
+		}
+	}
+	//if found in CR && !found in slice -> create
+	if !found {
+		//CREATE
+		if err := r.brokerCreate(ctx, &broker); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	klog.Infof("Reconciling Broker %s", req.NamespacedName)
+
 	return ctrl.Result{}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *KnownClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *BrokerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&networkv1alpha1.KnownCluster{}).
+		For(&networkv1alpha1.Broker{}).
 		Complete(r)
 }
 
@@ -266,4 +310,37 @@ func doHousekeeping(ctx context.Context, cl client.Client) error {
 			return nil
 		}
 	}
+}
+
+func (r *BrokerReconciler) brokerUpdate(ctx context.Context, broker *networkv1alpha1.Broker, brok *BrokerClient, index int) error {
+
+	if err := r.brokerDelete( /*ctx, broker,*/ brok, index); err != nil {
+		return err
+	}
+	if err := r.brokerCreate(ctx, broker); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *BrokerReconciler) brokerCreate(ctx context.Context, broker *networkv1alpha1.Broker) error {
+
+	var bc BrokerClient
+	if err := bc.SetupBrokerClient(ctx, r.Client, broker); err != nil {
+		return err
+	}
+	r.ActiveBrokers = append(r.ActiveBrokers, &bc)
+	return nil
+}
+
+func (r *BrokerReconciler) brokerDelete( /*ctx context.Context, broker *networkv1alpha1.Broker,*/ brok *BrokerClient, index int) error {
+
+	if err := brok.ch.Close(); err != nil {
+		return err
+	}
+	if err := brok.conn.Close(); err != nil {
+		return err
+	}
+	r.ActiveBrokers = append(r.ActiveBrokers[:index], r.ActiveBrokers[index+1:]...)
+	return nil
 }
