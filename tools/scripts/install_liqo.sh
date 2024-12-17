@@ -1,4 +1,4 @@
-#!/usr/bin/bash
+#!/opt/homebrew/bin/bash
 
 
 # Function to check if liqoctl is installed
