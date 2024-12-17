@@ -18,6 +18,26 @@ rules:
 - apiGroups:
   - network.fluidos.eu
   resources:
+  - brokers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - network.fluidos.eu
+  resources:
+  - brokers/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - network.fluidos.eu
+  resources:
   - knownclusters
   verbs:
   - create

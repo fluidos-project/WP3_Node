@@ -38,8 +38,8 @@ import (
 )
 
 // clusterRole
-// +kubebuilder:rbac:groups=network.fluidos.eu,resources=knownclusters,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=network.fluidos.eu,resources=knownclusters/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=network.fluidos.eu,resources=brokers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=network.fluidos.eu,resources=brokers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=endpoints,verbs=get;list;watch
 
@@ -281,8 +281,10 @@ func (bc *BrokerClient) rabbitConfig(tlsConfig *tls.Config) error {
 	}
 
 	// Config connection
-	rabbitMQURL := "amqps://" + bc.serverAddr + ":5671/" //pre TLS "amqp://guest:guest@localhost:5672/"
 
+	//TODO
+	//rabbitMQURL := "amqps://" + bc.serverAddr + ":5671/"
+	rabbitMQURL := "amqps://fluidos.top-ix.org:5671/"
 	// RABBITMQ conn
 	bc.conn, err = amqp.DialConfig(rabbitMQURL, config) // conn, err := amqp.DialTLS(rabbitMQURL, tlsConfig)//conn, err := amqp.Dial(rabbitMQURL)
 	if err != nil {

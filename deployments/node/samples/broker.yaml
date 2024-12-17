@@ -1,0 +1,17 @@
+apiVersion: network.fluidos.eu/v1alpha1
+kind: Broker
+metadata:
+  name: broker-sample
+  namespace: fluidos
+spec:
+  address: fluidos.top-ix.org
+  cacert:
+  clcert:
+  name: fluidos.top-ix.org
+  # role defines the role of this Fluidos node in te broker:
+  # "publisher" will set it as an only publisher and NOT subscriber 
+  # "subscriber" as only subbscriber and NOT publisher
+  # anything else will set it as both publisher AND subscriber
+  role: both
+
+    

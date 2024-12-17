@@ -42,7 +42,7 @@ type BrokerStatus struct {
 
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
-//+kubebuilder:resource:shortName=Broker;Brokers
+//+kubebuilder:resource:shortName=broker;brokers
 
 // Broker is the Schema for the clusters API.
 type Broker struct {

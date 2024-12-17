@@ -12,8 +12,8 @@ spec:
     listKind: BrokerList
     plural: brokers
     shortNames:
-    - Broker
-    - Brokers
+    - broker
+    - brokers
     singular: broker
   scope: Namespaced
   versions:
