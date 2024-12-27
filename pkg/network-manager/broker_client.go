@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -65,6 +66,7 @@ type BrokerClient struct {
 	//queue        amqp.Queue
 	msgs        <-chan amqp.Delivery
 	outboundMsg []byte
+	confirms    chan amqp.Confirmation
 }
 
 // Setup the Broker Client from NM reconcile
@@ -159,28 +161,33 @@ func (bc *BrokerClient) SetupBrokerClient(ctx context.Context, cl client.Client,
 func (bc *BrokerClient) ExecuteBrokerClient(ctx context.Context, cl client.Client) error {
 	// Start sending messages
 
+	klog.Info("EXECUTING Broker Client routines")
+	var err error
 	if bc.pubFlag {
 		go func() {
-			if err := bc.publishOnBroker(ctx); err != nil {
+			if err = bc.publishOnBroker(ctx); err != nil {
 				klog.ErrorS(err, "Error sending advertisement")
 			}
 		}()
 	}
 
 	// Start receiving messages
-	if bc.subFlag {
-		go func() {
-			if err := bc.readMsgOnBroker(ctx, cl); err != nil {
-				klog.ErrorS(err, "Error receiving advertisement")
-			}
-		}()
-	}
-	return nil
+	// if bc.subFlag {
+	// 	go func() {
+	// 		if err = bc.readMsgOnBroker(ctx, cl); err != nil {
+	// 			klog.ErrorS(err, "Error receiving advertisement")
+	// 		}
+	// 	}()
+	// }
+	return err
 }
 
 func (bc *BrokerClient) publishOnBroker(ctx context.Context) error {
+
+	fmt.Printf("Hex dump MARSHAL BROK: %x\n", bc.outboundMsg)
 	ticker := time.NewTicker(10 * time.Second)
 	for {
+		klog.Info("PUBLISHING on Broker\n")
 		select {
 		case <-ticker.C:
 			// Pubblicazione del messaggio sull'exchange con la routing key
@@ -188,20 +195,32 @@ func (bc *BrokerClient) publishOnBroker(ctx context.Context) error {
 			err := bc.ch.Publish(
 				bc.exchangeName, // Nome dell'exchange
 				bc.routingKey,   // Routing key per instradare il messaggio
-				false,           // Mandatory
+				true,            // Mandatory, se non routable errore
 				false,           // Immediate
 				amqp.Publishing{
-					ContentType: "text/plain",
-					Body:        bc.outboundMsg, //json.Marshal(bc.ID), //MARSHAL JSON
+					ContentType: "application/json", //"text/plain",   //
+					Body:        bc.outboundMsg,     //json.Marshal(bc.ID), //MARSHAL JSON
 				})
 			if err != nil {
 				klog.Fatalf("Error pub message: %v", err)
 			} else {
-				fmt.Printf("Message on exchange '%s' with routing key '%s': \n", bc.exchangeName, bc.routingKey)
+				//fmt.Printf("Message on exchange '%s' with routing key '%s': \n", bc.exchangeName, bc.routingKey)
+			}
+
+			select {
+			case confirm := <-bc.confirms:
+				if confirm.Ack {
+					klog.Info("Message successfully published!")
+				} else {
+					klog.Info("Message failed to publish!")
+				}
+			case <-time.After(5 * time.Second): // Timeout
+				klog.Info("No confirmation received, message status unknown.")
 			}
 
 		case <-ctx.Done():
 			ticker.Stop()
+			klog.Info("Ticker stopped\n")
 			return nil
 		}
 	}
@@ -209,16 +228,21 @@ func (bc *BrokerClient) publishOnBroker(ctx context.Context) error {
 
 func (bc *BrokerClient) readMsgOnBroker(ctx context.Context, cl client.Client) error {
 
+	klog.Info("READING from Broker")
 	for d := range bc.msgs {
+
+		klog.Info("Received remote advertisement BROKER\n")
 		fmt.Printf("Message: %s", d.Body)
 		var remote NetworkManager
 		buffer := make([]byte, 1024)
 
 		err := json.Unmarshal(buffer[:len(d.Body)], &remote.ID)
+		fmt.Printf("\nHex dump UNMARSHAL BROK: %x\n", buffer)
 		if err != nil {
 			klog.Error("Error unmarshalling message: ", err)
 			continue
 		}
+		klog.InfoS("Received remote advertisement BROKER %s", buffer)
 
 		//create knownCluster CR
 		kc := &networkv1alpha1.Broker{}
@@ -265,7 +289,7 @@ func extractCNfromCert(certPEM *[]byte) (string, error) { //certPath string
 	CN := cert.Subject.CommonName
 	fmt.Printf("Common Name (CN): %s\n", CN)
 
-	return CN, err
+	return strings.TrimSpace(CN), err
 }
 
 func (bc *BrokerClient) rabbitConfig(tlsConfig *tls.Config) error {
@@ -300,7 +324,7 @@ func (bc *BrokerClient) rabbitConfig(tlsConfig *tls.Config) error {
 	//defer bc.ch.Close()                                    GRACEFUL
 
 	//QUEUE CREATED SERVERSIDE
-	// bc.queue, err = bc.ch.QueueDeclare(
+	// queue, err := bc.ch.QueueDeclare(
 	// 	bc.queueName, // Nome della coda
 	// 	true,         // Durability: la coda sopravvive ai riavvii di RabbitMQ
 	// 	false,        // AutoDelete: la coda viene eliminata quando tutti i consumatori si disconnettono
@@ -312,7 +336,7 @@ func (bc *BrokerClient) rabbitConfig(tlsConfig *tls.Config) error {
 	// 	klog.Fatalf("Error declaring queue: %s", err)
 	// }
 
-	// fmt.Printf("Waiting messages on queue %s", bc.queue.Name)
+	// fmt.Printf("Waiting messages on queue %s", bc.queueName)
 
 	// Sottoscrizione alla coda
 	bc.msgs, err = bc.ch.Consume(
@@ -328,7 +352,15 @@ func (bc *BrokerClient) rabbitConfig(tlsConfig *tls.Config) error {
 		klog.Fatalf("Error subscribing queue: %s", err)
 	}
 
+	// Abilita le conferme del broker
+	if err := bc.ch.Confirm(false); err != nil {
+		log.Fatalf("Failed to enable publisher confirms: %v", err)
+	}
+
+	// Canali per ricevere conferme e nack
+	bc.confirms = bc.ch.NotifyPublish(make(chan amqp.Confirmation, 1))
+
 	klog.InfoS("Node", "ID", bc.ID.NodeID, "Client Address", bc.ID.IP, "Server Address", bc.serverAddr, "RoutingKey", bc.routingKey)
 
-	return nil
+	return err
 }
