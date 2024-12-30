@@ -55,15 +55,13 @@ type BrokerClient struct {
 	serverAddr string
 	clCert     *corev1.Secret
 	caCert     *corev1.Secret
-	//clientIP   string
 
 	conn         *amqp.Connection
 	ch           *amqp.Channel
 	exchangeName string
 	routingKey   string
 
-	queueName string
-	//queue        amqp.Queue
+	queueName   string
 	msgs        <-chan amqp.Delivery
 	outboundMsg []byte
 	confirms    chan amqp.Confirmation
@@ -135,7 +133,6 @@ func (bc *BrokerClient) SetupBrokerClient(ctx context.Context, cl client.Client,
 	ok = caCertPool.AppendCertsFromPEM(caCertData)
 	if !ok {
 		klog.Fatalf("AppendCertsFromPEM error: %v", ok)
-		return fmt.Errorf("AppendCertsFromPEM error: parsing failed")
 	}
 
 	// TLS config
@@ -143,10 +140,10 @@ func (bc *BrokerClient) SetupBrokerClient(ctx context.Context, cl client.Client,
 		Certificates: []tls.Certificate{cert},
 		RootCAs:      caCertPool,
 		ServerName:   bc.serverName,
-		//InsecureSkipVerify: false, // Disabilita solo per debug ma anche no; consenti verifica SSL in produzione
+		//InsecureSkipVerify: false, //skippa/consenti verifica SSL in produzione
 	}
 
-	bc.routingKey, err = extractCNfromCert(&clientCert) //"clientA" // Routing key specifica per il topic
+	bc.routingKey, err = extractCNfromCert(&clientCert) // Routing key specifica per il topic
 	if err != nil {
 		klog.Fatalf("Common Name extraction error: %v", err)
 	}
@@ -172,34 +169,32 @@ func (bc *BrokerClient) ExecuteBrokerClient(ctx context.Context, cl client.Clien
 	}
 
 	// Start receiving messages
-	// if bc.subFlag {
-	// 	go func() {
-	// 		if err = bc.readMsgOnBroker(ctx, cl); err != nil {
-	// 			klog.ErrorS(err, "Error receiving advertisement")
-	// 		}
-	// 	}()
-	// }
+	if bc.subFlag {
+		go func() {
+			if err = bc.readMsgOnBroker(ctx, cl); err != nil {
+				klog.ErrorS(err, "Error receiving advertisement")
+			}
+		}()
+	}
 	return err
 }
 
 func (bc *BrokerClient) publishOnBroker(ctx context.Context) error {
 
-	fmt.Printf("Hex dump MARSHAL BROK: %x\n", bc.outboundMsg)
 	ticker := time.NewTicker(10 * time.Second)
 	for {
-		klog.Info("PUBLISHING on Broker\n")
 		select {
 		case <-ticker.C:
-			// Pubblicazione del messaggio sull'exchange con la routing key
 
+			// Pubblicazione del messaggio sull'exchange con la routing key
 			err := bc.ch.Publish(
 				bc.exchangeName, // Nome dell'exchange
 				bc.routingKey,   // Routing key per instradare il messaggio
 				true,            // Mandatory, se non routable errore
 				false,           // Immediate
 				amqp.Publishing{
-					ContentType: "application/json", //"text/plain",   //
-					Body:        bc.outboundMsg,     //json.Marshal(bc.ID), //MARSHAL JSON
+					ContentType: "application/json",
+					Body:        bc.outboundMsg,
 				})
 			if err != nil {
 				klog.Fatalf("Error pub message: %v", err)
@@ -228,45 +223,44 @@ func (bc *BrokerClient) publishOnBroker(ctx context.Context) error {
 
 func (bc *BrokerClient) readMsgOnBroker(ctx context.Context, cl client.Client) error {
 
-	klog.Info("READING from Broker")
+	klog.Info("Listening from Broker")
 	for d := range bc.msgs {
 
-		klog.Info("Received remote advertisement BROKER\n")
-		fmt.Printf("Message: %s", d.Body)
+		klog.Info("Received remote advertisement from BROKER\n")
 		var remote NetworkManager
-		buffer := make([]byte, 1024)
+		err := json.Unmarshal(d.Body, &remote.ID)
 
-		err := json.Unmarshal(buffer[:len(d.Body)], &remote.ID)
-		fmt.Printf("\nHex dump UNMARSHAL BROK: %x\n", buffer)
 		if err != nil {
 			klog.Error("Error unmarshalling message: ", err)
 			continue
 		}
-		klog.InfoS("Received remote advertisement BROKER %s", buffer)
+		// Check if received advertisement is remote
+		if bc.ID.IP != remote.ID.IP {
 
-		//create knownCluster CR
-		kc := &networkv1alpha1.Broker{}
+			//create knownCluster CR
+			kc := &networkv1alpha1.KnownCluster{}
 
-		if err := cl.Get(ctx, client.ObjectKey{Name: namings.ForgeKnownClusterName(remote.ID.NodeID), Namespace: flags.FluidosNamespace}, kc); err != nil {
-			if client.IgnoreNotFound(err) == nil {
-				klog.Info("KnownCluster not found: creating")
+			if err := cl.Get(ctx, client.ObjectKey{Name: namings.ForgeKnownClusterName(remote.ID.NodeID), Namespace: flags.FluidosNamespace}, kc); err != nil {
+				if client.IgnoreNotFound(err) == nil {
+					klog.Info("KnownCluster not found: creating")
 
-				// Create new KnownCluster CR
-				if err := cl.Create(ctx, resourceforge.ForgeKnownCluster(remote.ID.NodeID, remote.ID.IP)); err != nil {
+					// Create new KnownCluster CR
+					if err := cl.Create(ctx, resourceforge.ForgeKnownCluster(remote.ID.NodeID, remote.ID.IP)); err != nil {
+						return err
+					}
+					klog.InfoS("KnownCluster created", "ID", remote.ID.NodeID)
+				}
+			} else {
+				klog.Info("KnownCluster already present: updating")
+				kc.UpdateStatus()
+
+				// Update fetched KnownCluster CR
+				err := cl.Status().Update(ctx, kc)
+				if err != nil {
 					return err
 				}
-				klog.InfoS("KnownCluster created", "ID", remote.ID.NodeID)
+				klog.InfoS("KnownCluster updated", "ID", kc.ObjectMeta.Name)
 			}
-		} else {
-			klog.Info("KnownCluster already present: updating")
-			kc.UpdateStatus()
-
-			// Update fetched KnownCluster CR
-			err := cl.Status().Update(ctx, kc)
-			if err != nil {
-				return err
-			}
-			klog.InfoS("KnownCluster updated", "ID", kc.ObjectMeta.Name)
 		}
 	}
 	return nil
@@ -282,12 +276,12 @@ func extractCNfromCert(certPEM *[]byte) (string, error) { //certPath string
 
 	// Parsing X.509
 	cert, err := x509.ParseCertificate(block.Bytes)
+
 	if err != nil {
 		klog.Fatalf("Error parsing certificate X.509 in CN extraction: %v", err)
 	}
 
 	CN := cert.Subject.CommonName
-	fmt.Printf("Common Name (CN): %s\n", CN)
 
 	return strings.TrimSpace(CN), err
 }
@@ -306,8 +300,6 @@ func (bc *BrokerClient) rabbitConfig(tlsConfig *tls.Config) error {
 
 	// Config connection
 
-	//TODO
-	//rabbitMQURL := "amqps://" + bc.serverAddr + ":5671/"
 	rabbitMQURL := "amqps://fluidos.top-ix.org:5671/"
 	// RABBITMQ conn
 	bc.conn, err = amqp.DialConfig(rabbitMQURL, config) // conn, err := amqp.DialTLS(rabbitMQURL, tlsConfig)//conn, err := amqp.Dial(rabbitMQURL)
@@ -323,28 +315,13 @@ func (bc *BrokerClient) rabbitConfig(tlsConfig *tls.Config) error {
 	}
 	//defer bc.ch.Close()                                    GRACEFUL
 
-	//QUEUE CREATED SERVERSIDE
-	// queue, err := bc.ch.QueueDeclare(
-	// 	bc.queueName, // Nome della coda
-	// 	true,         // Durability: la coda sopravvive ai riavvii di RabbitMQ
-	// 	false,        // AutoDelete: la coda viene eliminata quando tutti i consumatori si disconnettono
-	// 	false,        // Exclusive: accessibile solo dalla connessione corrente
-	// 	false,        // NoWait: non aspettare la conferma del server
-	// 	nil,          // Argomenti aggiuntivi (es. TTL o priorità)
-	// )
-	// if err != nil {
-	// 	klog.Fatalf("Error declaring queue: %s", err)
-	// }
-
-	// fmt.Printf("Waiting messages on queue %s", bc.queueName)
-
-	// Sottoscrizione alla coda
+	// Queue subscrition
 	bc.msgs, err = bc.ch.Consume(
 		bc.queueName, // Nome della coda
 		"",           // Nome del consumatore (vuoto per uno generato automaticamente)
 		true,         // AutoAck: conferma automatica della ricezione del messaggio
 		false,        // Exclusive: solo questo consumatore può accedere alla coda
-		false,        // NoLocal: non riceve messaggi pubblicati dalla stessa connessione       --TO BE SET--
+		true,         //false,        // NoLocal: non riceve messaggi pubblicati dalla stessa connessione       --TO BE SET--
 		false,        // NoWait: non aspettare la conferma del server
 		nil,          // Argomenti aggiuntivi
 	)
@@ -352,12 +329,12 @@ func (bc *BrokerClient) rabbitConfig(tlsConfig *tls.Config) error {
 		klog.Fatalf("Error subscribing queue: %s", err)
 	}
 
-	// Abilita le conferme del broker
+	// Write confirm broker
 	if err := bc.ch.Confirm(false); err != nil {
 		log.Fatalf("Failed to enable publisher confirms: %v", err)
 	}
 
-	// Canali per ricevere conferme e nack
+	// Channels for write confirm
 	bc.confirms = bc.ch.NotifyPublish(make(chan amqp.Confirmation, 1))
 
 	klog.InfoS("Node", "ID", bc.ID.NodeID, "Client Address", bc.ID.IP, "Server Address", bc.serverAddr, "RoutingKey", bc.routingKey)

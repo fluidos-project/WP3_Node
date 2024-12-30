@@ -326,7 +326,11 @@ func (r *BrokerReconciler) brokerUpdate(ctx context.Context, broker *networkv1al
 func (r *BrokerReconciler) brokerCreate(ctx context.Context, broker *networkv1alpha1.Broker) error {
 
 	var bc BrokerClient
-	if err := bc.SetupBrokerClient(ctx, r.Client, broker); err != nil {
+	var err error
+	if err = bc.SetupBrokerClient(ctx, r.Client, broker); err != nil {
+		return err
+	}
+	if err = bc.ExecuteBrokerClient(ctx, r.Client); err != nil {
 		return err
 	}
 	r.ActiveBrokers = append(r.ActiveBrokers, &bc)
