@@ -43,6 +43,7 @@ import (
 // +kubebuilder:rbac:groups=network.fluidos.eu,resources=brokers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=endpoints,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
 // NetworkManager keeps all the necessary class data.
 type BrokerClient struct {
@@ -78,12 +79,30 @@ func (bc *BrokerClient) SetupBrokerClient(ctx context.Context, cl client.Client,
 		return fmt.Errorf("failed to get Node Identity")
 	}
 
+	bc.clCert = &corev1.Secret{}
+	bc.caCert = &corev1.Secret{}
+
+	//Spec Secret
+	clSecretName := "broker-client-secret"
+	caSecretName := "broker-ca-secret"
+	secretNamespace := "fluidos"
+
+	err = bc.extractSecret(cl, clSecretName, secretNamespace, bc.clCert)
+	if err != nil {
+		return err
+	}
+	err = bc.extractSecret(cl, caSecretName, secretNamespace, bc.caCert)
+	if err != nil {
+		return err
+	}
+
 	bc.ID = nodeIdentity
 	bc.serverName = broker.Spec.Name
 	bc.serverAddr = broker.Spec.Address
-	bc.clCert = broker.Spec.ClCert
-	bc.caCert = broker.Spec.CaCert
 	bc.exchangeName = "DefaultPeerRequest"
+
+	fmt.Printf("CA Secret Name: %s\n", broker.Spec.CaCert.Name)
+	fmt.Printf("Client Secret Name: %s\n", broker.Spec.ClCert.Name)
 
 	//setting pub/sub
 	if strings.EqualFold(broker.Spec.Role, "publisher") {
@@ -102,22 +121,24 @@ func (bc *BrokerClient) SetupBrokerClient(ctx context.Context, cl client.Client,
 		return err
 	}
 
+	fmt.Printf("Client CERT: %s\n", broker.Spec.ClCert)
 	// Extract certs and key
+	//clientCert, ok := broker.Spec.ClCert.Data["tls.crt"]
 	clientCert, ok := bc.clCert.Data["tls.crt"]
 	if !ok {
-		klog.Fatalf("cert error: %v", ok)
+		klog.Fatalf("missing certificate: 'tls.crt' not found in clCert Data")
 		return fmt.Errorf("missing certificate: 'tls.crt' not found in clCert Data")
 	}
 
 	clientKey, ok := bc.clCert.Data["tls.key"]
 	if !ok {
-		klog.Fatalf("key error: %v", ok)
+		klog.Fatalf("missing key: 'tls.key' not found in clCert Data")
 		return fmt.Errorf("missing key: 'tls.key' not found in clCert Data")
 	}
 
-	caCertData, ok := bc.caCert.Data["tls.crt"]
+	caCertData, ok := bc.caCert.Data["CA_cert.pem"]
 	if !ok {
-		klog.Fatalf("CA cert error: %v", ok)
+		klog.Fatalf("missing certificate: 'tls.crt' not found in CACert Data")
 		return fmt.Errorf("missing certificate: 'tls.crt' not found in CACert Data")
 	}
 
@@ -149,7 +170,7 @@ func (bc *BrokerClient) SetupBrokerClient(ctx context.Context, cl client.Client,
 	}
 	bc.queueName = bc.routingKey
 
-	bc.rabbitConfig(tlsConfig)
+	err = bc.rabbitConfig(tlsConfig)
 
 	return err
 }
@@ -188,10 +209,10 @@ func (bc *BrokerClient) publishOnBroker(ctx context.Context) error {
 
 			// Pubblicazione del messaggio sull'exchange con la routing key
 			err := bc.ch.Publish(
-				bc.exchangeName, // Nome dell'exchange
-				bc.routingKey,   // Routing key per instradare il messaggio
-				true,            // Mandatory, se non routable errore
-				false,           // Immediate
+				bc.exchangeName,
+				bc.routingKey,
+				true,  // Mandatory: se non routable errore
+				false, // Immediate
 				amqp.Publishing{
 					ContentType: "application/json",
 					Body:        bc.outboundMsg,
@@ -242,16 +263,16 @@ func (bc *BrokerClient) readMsgOnBroker(ctx context.Context, cl client.Client) e
 
 			if err := cl.Get(ctx, client.ObjectKey{Name: namings.ForgeKnownClusterName(remote.ID.NodeID), Namespace: flags.FluidosNamespace}, kc); err != nil {
 				if client.IgnoreNotFound(err) == nil {
-					klog.Info("KnownCluster not found: creating")
+					klog.Info("KnownCluster not found: creating form Broker")
 
 					// Create new KnownCluster CR
 					if err := cl.Create(ctx, resourceforge.ForgeKnownCluster(remote.ID.NodeID, remote.ID.IP)); err != nil {
 						return err
 					}
-					klog.InfoS("KnownCluster created", "ID", remote.ID.NodeID)
+					klog.InfoS("KnownCluster created from Broker", "ID", remote.ID.NodeID)
 				}
 			} else {
-				klog.Info("KnownCluster already present: updating")
+				klog.Info("KnownCluster already present: updating from Broker")
 				kc.UpdateStatus()
 
 				// Update fetched KnownCluster CR
@@ -259,7 +280,7 @@ func (bc *BrokerClient) readMsgOnBroker(ctx context.Context, cl client.Client) e
 				if err != nil {
 					return err
 				}
-				klog.InfoS("KnownCluster updated", "ID", kc.ObjectMeta.Name)
+				klog.InfoS("KnownCluster updated from Broker", "ID", kc.ObjectMeta.Name)
 			}
 		}
 	}
@@ -299,12 +320,12 @@ func (bc *BrokerClient) rabbitConfig(tlsConfig *tls.Config) error {
 	}
 
 	// Config connection
-
 	rabbitMQURL := "amqps://fluidos.top-ix.org:5671/"
 	// RABBITMQ conn
-	bc.conn, err = amqp.DialConfig(rabbitMQURL, config) // conn, err := amqp.DialTLS(rabbitMQURL, tlsConfig)//conn, err := amqp.Dial(rabbitMQURL)
+	bc.conn, err = amqp.DialConfig(rabbitMQURL, config)
 	if err != nil {
 		klog.Fatalf("RabbitMQ connection error: %v", err)
+		return err
 	}
 	//defer bc.conn.Close()                                 GRACEFUL
 
@@ -312,6 +333,7 @@ func (bc *BrokerClient) rabbitConfig(tlsConfig *tls.Config) error {
 	bc.ch, err = bc.conn.Channel()
 	if err != nil {
 		klog.Fatalf("channel creation error: %v", err)
+		return err
 	}
 	//defer bc.ch.Close()                                    GRACEFUL
 
@@ -327,11 +349,13 @@ func (bc *BrokerClient) rabbitConfig(tlsConfig *tls.Config) error {
 	)
 	if err != nil {
 		klog.Fatalf("Error subscribing queue: %s", err)
+		return err
 	}
 
 	// Write confirm broker
 	if err := bc.ch.Confirm(false); err != nil {
 		log.Fatalf("Failed to enable publisher confirms: %v", err)
+		return err
 	}
 
 	// Channels for write confirm
@@ -339,5 +363,18 @@ func (bc *BrokerClient) rabbitConfig(tlsConfig *tls.Config) error {
 
 	klog.InfoS("Node", "ID", bc.ID.NodeID, "Client Address", bc.ID.IP, "Server Address", bc.serverAddr, "RoutingKey", bc.routingKey)
 
-	return err
+	return nil
+}
+
+func (bc *BrokerClient) extractSecret(cl client.Client, secretName string, secretNamespace string, secretDest *corev1.Secret) error {
+
+	err := cl.Get(context.TODO(), client.ObjectKey{
+		Name:      secretName,
+		Namespace: secretNamespace,
+	}, secretDest)
+	if err != nil {
+		fmt.Printf("Error retrieving Secret: %v\n", err)
+		return err
+	}
+	return nil
 }

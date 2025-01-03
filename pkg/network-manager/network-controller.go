@@ -50,14 +50,14 @@ type NetworkManager struct {
 	EnableLocalDiscovery bool
 }
 
-// KnownClusterReconciler reconciles a KnownCluster object.
+// BrokerReconciler reconciles a Broker object.
 type BrokerReconciler struct {
 	client.Client
 	Scheme        *runtime.Scheme
 	ActiveBrokers []*BrokerClient
 }
 
-// Reconcile reconciles a KnownClusters from DiscoveredClustersList.
+// Reconcile reconciles a Broker.
 func (r *BrokerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx, "broker", req.NamespacedName)
 	ctx = ctrl.LoggerInto(ctx, log)
@@ -75,7 +75,7 @@ func (r *BrokerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		for i, brok := range r.ActiveBrokers {
 			if brok.serverAddr == broker.Spec.Address {
 				//DELETE GRACEFUL
-				if err := r.brokerDelete( /*ctx, &broker,*/ brok, i); err != nil {
+				if err := r.brokerDelete(brok, i); err != nil {
 					return ctrl.Result{}, err
 				}
 				break
